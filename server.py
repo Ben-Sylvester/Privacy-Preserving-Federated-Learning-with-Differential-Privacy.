@@ -1,6 +1,5 @@
 import torch
 
-
 def fedavg(global_model, client_updates):
     global_state = global_model.state_dict()
 
