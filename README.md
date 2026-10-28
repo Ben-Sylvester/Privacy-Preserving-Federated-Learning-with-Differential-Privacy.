@@ -1,153 +1,105 @@
+# DP-FedAvg: federated learning with differentially private local training
 
-# DP-FedAvg: Differentially Private Federated Learning Simulation
+A simulation of federated averaging (FedAvg) in which every client trains with
+DP-SGD (per-example gradient clipping plus Gaussian noise) and a Rényi-DP accountant
+tracks the privacy budget each client spends. Clients are simulated in one process.
+The code supports MNIST (MLP) and CIFAR-10 (small CNN), balanced (IID) and
+label-skewed (Dirichlet) partitions, a centralised baseline, an offline ε audit, and a
+gradient-inversion attack with and without DP noise.
 
-Welcome to the official simulation repository for the paper:  
-**"Differentially Private Federated Learning for Secure Collaborative Analytics Across 100 Simulated Institutions"**
+## Files
 
-This codebase implements a modular, privacy-preserving Federated Learning pipeline using PyTorch and [Opacus](https://opacus.ai/). It is designed to evaluate the trade-offs between privacy (Differential Privacy), utility (model accuracy), and data heterogeneity (Non-IID partitions) across simulated institutional nodes.
+| File | Purpose |
+|---|---|
+| `main.py` | Runs federated experiments; writes per-round and summary CSV files |
+| `federated_training.py` | The round loop: broadcast, local training, budget check, aggregation |
+| `client.py` | One simulated institution (local DP-SGD with Opacus) |
+| `server.py` | Sample-weighted FedAvg |
+| `data.py` | Datasets, IID and Dirichlet partitions |
+| `model.py` | MNIST MLP (784-128-64-10) and CIFAR-10 CNN |
+| `centralised.py` | Centralised baseline on the pooled training set |
+| `attack.py` | Gradient inversion against a single batch gradient, with and without DP noise |
+| `audit_epsilon.py` | Recomputes ε from (sampling rate, σ, steps, δ) without running training |
+| `smoke_test.py` | Checks the mechanics on synthetic data; no download needed |
 
-Whether you are looking to reproduce the paper's results, test new privacy accountants, or experiment with gradient inversion attacks, this repository provides a clean, extensible foundation.
-
-
-## 📂 Repository Structure
-
-```files
-├── main.py                 # The orchestrator: this handles training loops, sigma grids, and evaluation
-├── model.py                # The Neural network architectures (MNIST MLP & CIFAR-10 CNN)
-├── data.py                 # The Data loading and partitioning (IID & Dirichlet Non-IID)
-├── client.py               # The DPClientTrainer: wraps models in Opacus for DP-SGD
-├── federated_training.py   # The federated loop: manages rounds, budgets, and client selection
-├── server.py               # FedAvg aggregation logic (Weighted averaging of client deltas)
-├── attack.py               # Gradient Inversion Attack (Zhu et al.) & PSNR evaluation
-└── data/                   # Auto-created directory for downloaded datasets
-```
-
----
-
-## Environment Setup
-
-Differential privacy libraries can be particular about PyTorch versions. We recommend using a dedicated virtual environment.
+## Installation
 
 ```bash
-# 1. Create and activate a virtual environment
-python -m venv dp_fed_env
-source dp_fed_env/bin/activate  # On Windows: dp_fed_env\Scripts\activate
-
-# 2. Install dependencies 
-# (Ensure you install the CUDA-compatible version of PyTorch if you have an NVIDIA GPU)
-pip install torch torchvision opacus numpy
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python smoke_test.py               # about a minute on a CPU
 ```
 
----
+The smoke test checks that clients start each round from the global model, that
+aggregation is sample-weighted, that non-private clients are never excluded, that
+clients exceeding the budget are excluded, and that a calibrated σ keeps ε within the
+target. It uses synthetic data, so it says nothing about accuracy on MNIST or CIFAR-10.
 
-## Running Locally (VS Code / Terminal)
+## Running experiments
 
-*A quick heads-up: Simulating 100 clients for 100 rounds with DP-SGD is computationally heavy. While you can run this on a CPU, it will take a very long time. We highly recommend using a machine with an NVIDIA GPU.*
+Datasets are downloaded to `./data` on first use. A full run (100 clients, 100 rounds,
+3 local epochs) is slow on a CPU; a GPU is strongly recommended.
 
-1. **Open the Project**: Open the root folder in VS Code.
-2. **Select your Interpreter**: Ensure VS Code is using the `dp_fed_env` Python interpreter you just created.
-3. **Configure your Run**: Open `main.py`. At the top of the `main()` function, you'll find the configuration block. Adjust it based on what you want to test:
-   ```python
-   dataset_name = "mnist"      # Switch to "cifar10" for the harder dataset
-   partition = "iid"           # Switch to "non-iid" for Dirichlet label skew (α=0.5)
-   num_clients = 100           # Number of simulated institutions
-   rounds = 100                # Communication rounds
-   sigmas = [0.0, 0.8, 1.1, 2.5] # The noise multipliers (privacy levels) to test
-   ```
-4. **Execute**: Run the script via the VS Code terminal:
-   ```bash
-   python main.py
-   ```
-
----
-
-## Running in a Cloud Simulation Lab (Free GPUs)
-
-If you don't have a local GPU, cloud notebooks are the best way to run these experiments. 
-
-### Option A: Google Colab (Recommended)
-1. Head to [Google Colab](https://colab.research.google.com/) and create a **New Notebook**.
-2. Go to **Runtime > Change runtime type** and select **T4 GPU**.
-3. In the first cell, install the dependencies:
-   ```python
-   !pip install -q opacus torchvision
-   ```
-4. Click the **Folder icon** on the left sidebar and upload all the `.py` files from this repository.
-5. Run your scripts in subsequent cells:
-   ```python
-   !python main.py
-   ```
-   *(Pro-tip: Mount your Google Drive at the top of the notebook using `from google.colab import drive; drive.mount('/content/drive')` so you can save your trained model weights and logs permanently!)*
-
-### Option B: Kaggle Notebooks
-1. Go to [Kaggle Notebooks](https://www.kaggle.com/code) and click **New Notebook**.
-2. In the right-hand settings panel, turn on **GPU T4 x2**.
-3. Click **Add Input > Upload** and drop in your `.py` files.
-4. Run `!pip install opacus` and then `!python main.py` in the notebook cells.
-
----
-
-## Reproducing the Paper's Results
-
-To generate the exact data for the tables and figures in the paper, follow this roadmap:
-
-### 1. Accuracy & Heterogeneity Gaps (Table II & Figure 1)
-You need to run `main.py` across different configurations. Keep a log of the final test accuracies.
-* **Centralised Baseline**: Train a standard model on the full dataset without FL or DP.
-* **FedAvg (No DP)**: Set `sigmas = [0.0]`. Run for both `partition = "iid"` and `"non-iid"`.
-* **DP-FedAvg**: Set `sigmas = [1.1]`. Run for both `partition = "iid"` and `"non-iid"`.
-* *Repeat this entire process with `dataset_name = "cifar10"` for the CIFAR columns.*
-
-### 2. The Privacy-Utility Curve (Table III)
-Set `partition = "iid"` and run the full grid: `sigmas = [0.0, 0.8, 1.1, 2.5]`. 
-The console will print the final accuracy and the exact $\epsilon$ logged by the Opacus Rényi accountant at $\delta = 10^{-5}$.
-
-### 3. Gradient Inversion Attack (Table IV)
-To prove that DP defeats gradient leakage, run the attack script:
 ```bash
-python attack.py
+# centralised baseline
+python centralised.py --dataset mnist
+
+# federated runs, fixed noise multipliers (sigma = 0 means no DP)
+python main.py --dataset mnist --partition iid     --sigmas 0 0.8 1.1 2.5 --trials 3
+python main.py --dataset mnist --partition non-iid --sigmas 0 1.1 --trials 3
+
+# choose a privacy budget and let each client's sigma be calibrated to it
+python main.py --dataset mnist --partition iid --target-epsilon 8 --trials 3
+
+# number of clients
+for k in 5 10 20 50 100; do python main.py --clients $k --sigmas 0 1.1 --out results_scale; done
+
+# gradient inversion
+python attack.py --data mnist --batch 1 --sigmas 0 1.1 2.5 --trials 10
 ```
-* **No DP**: The script will reconstruct the images and print a high PSNR (Target: ~24.8 dB).
-* **With DP**: To simulate the DP defense, modify `attack.py` to add Gaussian noise to the `target_grads` before passing them to the optimizer. The reconstructed images will turn to static, dropping the PSNR to < 5 dB.
 
----
+Each run writes `results/<dataset>_<partition>_K<clients>_<setting>_trial<t>_rounds.csv`
+(accuracy, participants, ε, uplink size and time for every round) and appends one row per
+run to `results/summary.csv`. Reported accuracy is the mean of the last ten rounds.
 
-## Expert Troubleshooting & Gotchas
+## How privacy is accounted
 
-* **`ModuleNotFoundError: No module named 'server'`**: 
-  If you cloned an older version of the code, you might be missing `server.py`. Create it and paste this standard FedAvg logic:
-  ```python
-  import torch
-  def fedavg(global_model, client_updates):
-      global_state = global_model.state_dict()
-      num_clients = len(client_updates)
-      for key in global_state.keys():
-          # Sum the deltas and average them
-          delta_sum = torch.stack([update[key] for update in client_updates]).sum(dim=0)
-          global_state[key] += delta_sum / num_clients
-  ```
-* **Opacus `Unsupported Module` Errors**: 
-  Standard `BatchNorm` layers break DP-SGD because they require tracking individual example statistics. Our `client.py` uses `ModuleValidator.fix()` to automatically swap these for `GroupNorm` or `InstanceNorm`. If you add custom layers to `model.py`, ensure they are DP-compatible.
-* **Out of Memory (OOM) on GPU**: 
-  Simulating 100 clients sequentially in a single process can eat up VRAM. If you hit an OOM error, lower the `batch_size` in `data.py` (e.g., to 128 or 64) or ensure you are clearing the CUDA cache between sigma runs in `main.py` by adding `torch.cuda.empty_cache()`.
+- Opacus draws each batch by Poisson sampling at rate `q = 1 / len(DataLoader)`. With
+  600 examples per client and batch size 256, `q ≈ 1/3`, which gives weak subsampling
+  amplification.
+- Each client keeps one accountant for the whole run, so ε is cumulative over all rounds
+  and local epochs. A client whose cumulative ε exceeds `--epsilon-budget` withholds that
+  round's update and stops participating.
+- The guarantee is example-level for the examples held by each client. It does not hide
+  whether a whole institution took part.
+- With a fixed σ, ε can exceed the intended budget quickly. At `q ≈ 1/3`, σ = 1.1 reaches
+  about ε = 7 after one round and far more after 100. Use `--target-epsilon` to calibrate σ
+  for the whole run, and check any reported ε with
+  `python audit_epsilon.py --n 600 --batch 256 --epochs 3 --rounds 100 --sigma 1.1`.
+- Under the Dirichlet partition, shard sizes differ, so each client has its own `q` and its
+  own calibrated σ. Summary files report the maximum and mean ε across clients.
 
----
+## Attack evaluation
 
-## Citation
+`attack.py` gives the attacker one mini-batch gradient from a randomly initialised MLP.
+For the defended case the gradient is formed as in DP-SGD (per-example clipping to norm C,
+Gaussian noise of standard deviation σC, division by the batch size). The default method
+matches gradients with a cosine distance and Adam; `--method lbfgs` runs the original
+Euclidean L-BFGS formulation. PSNR is computed on pixels in [0, 1].
 
-If you use this codebase or build upon our simulation methodology, please cite our paper:
+Two cautions. First, this is the single-step setting the attack was designed for, not an
+attack on a multi-epoch FedAvg update. Second, a comparison with DP only means something
+if the σ = 0 row shows the attack working. The attack recovers single images reliably but
+generally fails on larger batches even without DP, so run several trials, report the
+median, and state the batch size.
 
-```bibtex
-@article{sylvester2024dpfedavg,
-  title={Differentially Private Federated Learning for Secure Collaborative Analytics Across 100 Simulated Institutions},
-  author={Sylvester, Benjamin},
-  journal={Department of Computer Science, National Open University of Nigeria},
-  year={2024}
-}
-```
-"Note: check_epsilon.py computes the privacy budget assuming a uniform client dataset size of n samples. Actual per-client 
-ϵ
-ϵ may vary slightly due to partition size differences, but this represents a safe, conservative estimate."
+## Scope and limitations
 
----
-*Built with PyTorch and Opacus. Questions, issues, or pull requests are welcome!*
+- Everything runs in one process with in-memory communication. There is no network,
+  latency, client dropout or hardware variation.
+- Secure aggregation and transport encryption are not implemented. The server sees each
+  client's (noisy) update.
+- MNIST and CIFAR-10 are benchmarks, not clinical or financial data.
+- Runs are seeded per trial (`--seed` plus the trial index) for the partition and
+  initialisation. GPU kernels can still introduce small nondeterminism.
