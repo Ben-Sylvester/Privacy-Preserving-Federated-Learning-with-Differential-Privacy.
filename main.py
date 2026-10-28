@@ -1,71 +1,141 @@
+"""Run DP-FedAvg experiments.
+
+For Examples run the following commands:
+  python main.py --dataset mnist --partition iid --sigmas 0 0.8 1.1 2.5 --trials 3
+  python main.py --dataset mnist --partition non-iid --sigmas 1.1
+  python main.py --dataset mnist --partition iid --target-epsilon 8   # To calibrate sigma to a budget
+"""
+import argparse
+import csv
+import os
+
+import numpy as np
 import torch
-from model import MNIST_MLP, CIFAR10_CNN
+
+import data as D
 from client import DPClientTrainer
 from federated_training import federated_training
-from data import get_client_loaders
-from torchvision import datasets, transforms
+from model import MNIST_MLP, CIFAR10_CNN
 
-def evaluate_model(model, dataset_name, device="cpu"):
-    model.eval()
-    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]) if dataset_name == "mnist" else \
-                transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))])
-    
-    test_data = datasets.MNIST("./data", train=False, transform=transform) if dataset_name == "mnist" else \
-                datasets.CIFAR10("./data", train=False, transform=transform)
-    loader = torch.utils.data.DataLoader(test_data, batch_size=1000, shuffle=False)
-    
-    correct = 0
-    with torch.no_grad():
-        for x, y in loader:
-            x, y = x.to(device), y.to(device)
-            preds = model(x).argmax(dim=1)
-            correct += (preds == y).sum().item()
-    return 100.0 * correct / len(test_data)
+
+def build_model(name):
+    return MNIST_MLP() if name == "mnist" else CIFAR10_CNN()
+
+
+def make_evaluator(test_loader, device):
+    def evaluate(model):
+        model.eval()
+        correct = total = 0
+        with torch.no_grad():
+            for x, y in test_loader:
+                x, y = x.to(device), y.to(device)
+                correct += (model(x).argmax(1) == y).sum().item()
+                total += len(y)
+        return 100.0 * correct / total
+    return evaluate
+
+
+def run_trial(dataset, loaders, evaluate, *, sigma, target_epsilon, rounds, local_epochs,
+              lr, max_grad_norm, delta, epsilon_budget, device, seed, verbose=True):
+    torch.manual_seed(seed)
+    global_model = build_model(dataset).to(device)
+    clients = [
+        DPClientTrainer(build_model(dataset), loader, lr=lr, noise_multiplier=sigma,
+                        max_grad_norm=max_grad_norm, device=device,
+                        target_epsilon=target_epsilon, target_delta=delta,
+                        total_epochs=rounds * local_epochs)
+        for loader in loaders
+    ]
+    history = federated_training(global_model, clients, rounds, local_epochs, delta,
+                                 epsilon_budget, evaluate, verbose)
+    return history, clients
+
+
+def summarise(history):
+    acc = [h["accuracy"] for h in history]
+    last = history[-1]
+    first90 = next((h["round"] for h in history if h["accuracy"] >= 90.0), "")
+    return {
+        "final_acc_mean_last10": float(np.mean(acc[-10:])),
+        "final_acc_last": acc[-1],
+        "eps_max_final": last["eps_max"],
+        "eps_mean_final": last["eps_mean"],
+        "participants_mean": float(np.mean([h["participants"] for h in history])),
+        "nodes_exhausted_final": last["exhausted"],
+        "rounds_to_90": first90,
+        "uplink_mb_per_round": float(np.mean([h["uplink_mb"] for h in history])),
+    }
+
+
+def write_rows(path, rows):
+    if not rows:
+        return
+    new = not os.path.exists(path)
+    with open(path, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        if new:
+            w.writeheader()
+        w.writerows(rows)
+
+
+def parse():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--dataset", choices=["mnist", "cifar10"], default="mnist")
+    p.add_argument("--partition", choices=["iid", "non-iid"], default="iid")
+    p.add_argument("--clients", type=int, default=100)
+    p.add_argument("--rounds", type=int, default=100)
+    p.add_argument("--local-epochs", type=int, default=3)
+    p.add_argument("--batch-size", type=int, default=256)
+    p.add_argument("--lr", type=float, default=0.01)
+    p.add_argument("--max-grad-norm", type=float, default=1.0)
+    p.add_argument("--delta", type=float, default=1e-5)
+    p.add_argument("--alpha", type=float, default=0.5, help="Dirichlet concentration")
+    p.add_argument("--sigmas", type=float, nargs="+", default=[0.0, 0.8, 1.1, 2.5])
+    p.add_argument("--target-epsilon", type=float, default=None,
+                   help="calibrate each client's sigma to this budget over the whole run")
+    p.add_argument("--epsilon-budget", type=float, default=None,
+                   help="exclusion threshold (defaults to --target-epsilon, else 8.0)")
+    p.add_argument("--trials", type=int, default=3)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--out", default="results")
+    p.add_argument("--data-root", default="./data")
+    p.add_argument("--device", default="auto")
+    return p.parse_args()
+
 
 def main():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dataset_name = "mnist"      # Change to "cifar10" for CIFAR experiments
-    partition = "iid"           # Change to "non-iid" for Dirichlet experiments
-    num_clients = 100
-    rounds = 100
-    local_epochs = 3
-    batch_size = 256
-    lr = 0.01
-    max_grad_norm = 1.0
-    delta = 1e-5
-    
-    # Paper Table III: Noise multipliers to test
-    sigmas = [0.0, 0.8, 1.1, 2.5] 
-    
-    loaders, _ = get_client_loaders(dataset_name, partition, num_clients, batch_size)
-    
-    for sigma in sigmas:
-        print(f"\n{'='*20} Testing σ = {sigma} {'='*20}")
-        
-        # Initialize Model
-        global_model = MNIST_MLP() if dataset_name == "mnist" else CIFAR10_CNN()
-        global_model = global_model.to(device)
-        
-        # Initialize Clients
-        clients = [
-            DPClientTrainer(
-                model=MNIST_MLP() if dataset_name == "mnist" else CIFAR10_CNN(),
-                dataloader=loader,
-                lr=lr,
-                noise_multiplier=sigma,
-                max_grad_norm=max_grad_norm,
-                device=device
-            )
-            for loader in loaders
-        ]
-        
-        # Train
-        federated_training(global_model, clients, rounds, local_epochs, delta)
-        
-        # Evaluate
-        final_eps = clients[0].get_epsilon(delta) if sigma > 0 else float('inf')
-        acc = evaluate_model(global_model, dataset_name, device)
-        print(f"\n✅ Final Results for σ={sigma}: Accuracy = {acc:.2f}%, ε = {final_eps:.2f}")
+    a = parse()
+    device = ("cuda" if torch.cuda.is_available() else "cpu") if a.device == "auto" else a.device
+    os.makedirs(a.out, exist_ok=True)
+    budget = a.epsilon_budget if a.epsilon_budget is not None else (a.target_epsilon or 8.0)
+    settings = [("eps", a.target_epsilon)] if a.target_epsilon is not None else [("sigma", s) for s in a.sigmas]
+
+    train = D.load_dataset(a.dataset, True, a.data_root)
+    labels = np.asarray(train.targets)
+    evaluate = make_evaluator(D.get_test_loader(a.dataset, root=a.data_root), device)
+
+    for kind, value in settings:
+        label = f"{kind}{value:g}"
+        for t in range(a.trials):
+            seed = a.seed + t
+            print(f"\n== {a.dataset} {a.partition} K={a.clients} {label} trial {t} (seed {seed}) ==")
+            rng = np.random.default_rng(seed)
+            loaders, sizes = D.make_loaders(train, labels, a.partition, a.clients, a.batch_size, a.alpha, rng)
+            hist, _ = run_trial(
+                a.dataset, loaders, evaluate,
+                sigma=(value if kind == "sigma" else 0.0),
+                target_epsilon=(value if kind == "eps" else None),
+                rounds=a.rounds, local_epochs=a.local_epochs, lr=a.lr, max_grad_norm=a.max_grad_norm,
+                delta=a.delta, epsilon_budget=budget, device=device, seed=seed)
+            stem = f"{a.dataset}_{a.partition}_K{a.clients}_{label}_trial{t}"
+            write_rows(os.path.join(a.out, stem + "_rounds.csv"), hist)
+            s = summarise(hist)
+            s.update(dataset=a.dataset, partition=a.partition, clients=a.clients, setting=label,
+                     trial=t, seed=seed, min_shard=min(sizes), max_shard=max(sizes))
+            write_rows(os.path.join(a.out, "summary.csv"), [s])
+            print(f"  -> accuracy (mean of last 10 rounds) {s['final_acc_mean_last10']:.2f}%, "
+                  f"eps_max {s['eps_max_final']:.2f}, nodes excluded {s['nodes_exhausted_final']}")
+
 
 if __name__ == "__main__":
     main()

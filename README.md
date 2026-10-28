@@ -40,7 +40,7 @@ pip install torch torchvision opacus numpy
 
 ---
 
-## 💻 Running Locally (VS Code / Terminal)
+## Running Locally (VS Code / Terminal)
 
 *A quick heads-up: Simulating 100 clients for 100 rounds with DP-SGD is computationally heavy. While you can run this on a CPU, it will take a very long time. We highly recommend using a machine with an NVIDIA GPU.*
 
@@ -145,6 +145,9 @@ If you use this codebase or build upon our simulation methodology, please cite o
   year={2024}
 }
 ```
+"Note: check_epsilon.py computes the privacy budget assuming a uniform client dataset size of n samples. Actual per-client 
+ϵ
+ϵ may vary slightly due to partition size differences, but this represents a safe, conservative estimate."
 
 ---
 *Built with PyTorch and Opacus. Questions, issues, or pull requests are welcome!*
