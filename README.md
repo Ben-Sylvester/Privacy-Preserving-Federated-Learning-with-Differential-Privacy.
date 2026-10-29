@@ -76,9 +76,11 @@ run to `results/summary.csv`. Reported accuracy is the mean of the last ten roun
 - With a fixed σ, ε can exceed the intended budget quickly. At `q ≈ 1/3`, σ = 1.1 reaches
   about ε = 7 after one round and far more after 100. Use `--target-epsilon` to calibrate σ
   for the whole run, and check any reported ε with
-  `python audit_epsilon.py --n 600 --batch 256 --epochs 3 --rounds 100 --sigma 1.1`.
+  `python check_epsilon.py --n 600 --batch 256 --epochs 3 --rounds 100 --sigma 1.1`.
+  Note: This script computes the privacy budget assuming a uniform client dataset size of n samples. Actual per-client ε may vary slightly due to partition size differences (particularly under Dirichlet partitioning). However, evaluating with a representative or minimum n provides a safe, conservative estimate of the privacy guarantee.
 - Under the Dirichlet partition, shard sizes differ, so each client has its own `q` and its
   own calibrated σ. Summary files report the maximum and mean ε across clients.
+
 
 ## Attack evaluation
 
